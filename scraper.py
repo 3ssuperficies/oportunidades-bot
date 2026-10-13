@@ -25,6 +25,14 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 
+# Para sortear WAF que bloquean por huella TLS (403 pese a cabeceras correctas):
+# curl_cffi imita el handshake de un Chrome real. Si no está, caemos a requests.
+try:
+    from curl_cffi import requests as _cffi  # type: ignore
+    _HAS_CFFI = True
+except Exception:  # noqa: BLE001
+    _HAS_CFFI = False
+
 # ── Config ───────────────────────────────────────────────────────────────────
 OECE_API_BASE = os.environ.get(
     "OECE_API_BASE",
@@ -49,6 +57,18 @@ HEADERS = {
     "Accept-Language": "es-PE,es;q=0.9,en;q=0.8",
     "Referer": "https://contratacionesabiertas.oece.gob.pe/",
 }
+
+IMPERSONATE = os.environ.get("IMPERSONATE", "chrome")
+
+
+def http_get(url):
+    """GET que intenta imitar un navegador real (TLS incluido) si curl_cffi está."""
+    if _HAS_CFFI:
+        return _cffi.get(url, headers=HEADERS, timeout=60, impersonate=IMPERSONATE)
+    return requests.get(url, headers=HEADERS, timeout=60)
+
+
+HTTP_ENGINE = f"curl_cffi({IMPERSONATE})" if _HAS_CFFI else "requests"
 
 CATEGORY_ES = {"goods": "Bienes", "services": "Servicios", "works": "Obras"}
 
@@ -227,7 +247,7 @@ def main():
     keywords = load_keywords(KEYWORDS_FILE)
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     print(f"== Bot Oportunidades · {datetime.now(timezone.utc).isoformat()} ==")
-    print(f"   keywords: {len(keywords)} · lookback: {LOOKBACK_DAYS}d · dry_run: {DRY_RUN}")
+    print(f"   keywords: {len(keywords)} · lookback: {LOOKBACK_DAYS}d · dry_run: {DRY_RUN} · http: {HTTP_ENGINE}")
 
     if not DRY_RUN and (not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY):
         print("ERROR: faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.", file=sys.stderr)
@@ -239,7 +259,7 @@ def main():
     while url and pages < MAX_PAGES:
         pages += 1
         try:
-            resp = requests.get(url, timeout=60, headers=HEADERS)
+            resp = http_get(url)
             resp.raise_for_status()
             package = resp.json()
         except Exception as e:  # noqa: BLE001
