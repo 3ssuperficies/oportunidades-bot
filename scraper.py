@@ -21,6 +21,7 @@ import sys
 import json
 import time
 import unicodedata
+from urllib.parse import urlencode
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -60,15 +61,29 @@ HEADERS = {
 
 IMPERSONATE = os.environ.get("IMPERSONATE", "chrome")
 
+# El OSCE bloquea IPs de nube. ScraperAPI enruta por IP residencial y salta el WAF.
+# Si defines SCRAPER_API_KEY, todas las peticiones pasan por ahí.
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")
+SCRAPER_COUNTRY = os.environ.get("SCRAPER_COUNTRY", "")  # ej. 'pe' (geolocaliza; es de pago)
+
 
 def http_get(url):
-    """GET que intenta imitar un navegador real (TLS incluido) si curl_cffi está."""
+    """GET por ScraperAPI si hay key; si no, curl_cffi (TLS de navegador); si no, requests."""
+    if SCRAPER_API_KEY:
+        q = {"api_key": SCRAPER_API_KEY, "url": url}
+        if SCRAPER_COUNTRY:
+            q["country_code"] = SCRAPER_COUNTRY
+        return requests.get("https://api.scraperapi.com/?" + urlencode(q), timeout=90)
     if _HAS_CFFI:
         return _cffi.get(url, headers=HEADERS, timeout=60, impersonate=IMPERSONATE)
     return requests.get(url, headers=HEADERS, timeout=60)
 
 
-HTTP_ENGINE = f"curl_cffi({IMPERSONATE})" if _HAS_CFFI else "requests"
+HTTP_ENGINE = (
+    ("scraperapi" + (f"/{SCRAPER_COUNTRY}" if SCRAPER_COUNTRY else ""))
+    if SCRAPER_API_KEY
+    else (f"curl_cffi({IMPERSONATE})" if _HAS_CFFI else "requests")
+)
 
 CATEGORY_ES = {"goods": "Bienes", "services": "Servicios", "works": "Obras"}
 
