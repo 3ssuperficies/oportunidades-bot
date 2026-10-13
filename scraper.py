@@ -38,6 +38,18 @@ DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 KEYWORDS_FILE = os.environ.get("KEYWORDS_FILE", "keywords.txt")
 SEACE_BUSCADOR = "https://prod2.seace.gob.pe/seacebus-uiwd-pub/buscadorPublico/buscadorPublico.xhtml"
 
+# Muchos WAF del Estado cortan a 'python-requests'. Nos presentamos como navegador.
+DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+HEADERS = {
+    "User-Agent": os.environ.get("USER_AGENT", DEFAULT_UA),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "es-PE,es;q=0.9,en;q=0.8",
+    "Referer": "https://contratacionesabiertas.oece.gob.pe/",
+}
+
 CATEGORY_ES = {"goods": "Bienes", "services": "Servicios", "works": "Obras"}
 
 
@@ -227,7 +239,7 @@ def main():
     while url and pages < MAX_PAGES:
         pages += 1
         try:
-            resp = requests.get(url, timeout=60, headers={"Accept": "application/json"})
+            resp = requests.get(url, timeout=60, headers=HEADERS)
             resp.raise_for_status()
             package = resp.json()
         except Exception as e:  # noqa: BLE001
