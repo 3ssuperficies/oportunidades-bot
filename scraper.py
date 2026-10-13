@@ -174,6 +174,42 @@ def haystack(release):
     return norm(" ".join(parts))
 
 
+def extract_releases(package):
+    """La API puede devolver los datos con distintas formas. Las cubrimos todas."""
+    if isinstance(package, list):
+        out = []
+        for el in package:
+            out.extend(extract_releases(el))
+        return out
+    if not isinstance(package, dict):
+        return []
+    if isinstance(package.get("releases"), list):
+        return package["releases"]
+    if isinstance(package.get("records"), list):
+        out = []
+        for rec in package["records"]:
+            cr = rec.get("compiledRelease")
+            if isinstance(cr, dict):
+                out.append(cr)
+            elif isinstance(rec.get("releases"), list):
+                out.extend(rec["releases"])
+        return out
+    for k in ("data", "results", "items"):
+        if isinstance(package.get(k), list):
+            return package[k]
+    return []
+
+
+def next_link(package):
+    if isinstance(package, dict):
+        links = package.get("links")
+        if isinstance(links, dict) and links.get("next"):
+            return links["next"]
+        if package.get("next"):
+            return package["next"]
+    return None
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
     keywords = load_keywords(KEYWORDS_FILE)
@@ -198,7 +234,22 @@ def main():
             print(f"   ! error al bajar página {pages}: {e}", file=sys.stderr)
             break
 
-        releases = package.get("releases", []) or []
+        releases = extract_releases(package)
+
+        # Diagnóstico de la primera página: nos dice qué devolvió la API de verdad.
+        if pages == 1:
+            if isinstance(package, dict):
+                shape = "dict keys=[" + ", ".join(list(package.keys())[:12]) + "]"
+            elif isinstance(package, list):
+                shape = f"list len={len(package)}"
+            else:
+                shape = type(package).__name__
+            ct = resp.headers.get("content-type", "")
+            print(f"   [diag] status={resp.status_code} ct={ct} · {shape} · releases={len(releases)}")
+            if not releases:
+                snippet = resp.text[:1200].replace("\n", " ").replace("\r", " ")
+                print(f"   [diag] cuerpo (primeros 1200 car.): {snippet}")
+
         if not releases:
             break
 
@@ -222,7 +273,7 @@ def main():
 
         if stop:
             break
-        url = g(package, "links", "next")
+        url = next_link(package)
         time.sleep(0.5)  # cortesía con el servidor
 
     print(f"== Fin. páginas:{pages} vistas:{seen} coinciden:{matched} guardadas:{saved} ==")
