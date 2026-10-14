@@ -44,6 +44,10 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "2"))
 MAX_PAGES = int(os.environ.get("MAX_PAGES", "40"))
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
+# DIAG: ignora el corte por fecha y escanea pocas páginas, imprimiendo fechas y
+# títulos, para entender el orden/paginación de la API. No escribe nada.
+DIAG = os.environ.get("DIAG", "").lower() in ("1", "true", "yes")
+DIAG_PAGES = int(os.environ.get("DIAG_PAGES", "5"))
 KEYWORDS_FILE = os.environ.get("KEYWORDS_FILE", "keywords.txt")
 SEACE_BUSCADOR = "https://prod2.seace.gob.pe/seacebus-uiwd-pub/buscadorPublico/buscadorPublico.xhtml"
 
@@ -170,7 +174,7 @@ def parse_date(s):
 
 # ── Supabase ─────────────────────────────────────────────────────────────────
 def upsert(opp: dict):
-    if DRY_RUN:
+    if DRY_RUN or DIAG:
         print("   [dry-run] upsert:", opp["p_external_id"], "·", opp["p_title"][:70])
         return True
     url = f"{SUPABASE_URL}/rest/v1/rpc/upsert_opportunity"
@@ -264,14 +268,18 @@ def main():
     print(f"== Bot Oportunidades · {datetime.now(timezone.utc).isoformat()} ==")
     print(f"   keywords: {len(keywords)} · lookback: {LOOKBACK_DAYS}d · dry_run: {DRY_RUN} · http: {HTTP_ENGINE}")
 
-    if not DRY_RUN and (not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY):
+    if not DRY_RUN and not DIAG and (not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY):
         print("ERROR: faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.", file=sys.stderr)
         sys.exit(2)
 
     url = OECE_API_BASE
     seen, matched, saved, pages = 0, 0, 0, 0
+    page_cap = min(MAX_PAGES, DIAG_PAGES) if DIAG else MAX_PAGES
 
-    while url and pages < MAX_PAGES:
+    def rel_date_of(r):
+        return parse_date(r.get("date")) or parse_date(g(r, "tender", "tenderPeriod", "startDate"))
+
+    while url and pages < page_cap:
         pages += 1
         try:
             resp = http_get(url)
@@ -282,6 +290,17 @@ def main():
             break
 
         releases = extract_releases(package)
+
+        # Rango de fechas de la página: revela el ORDEN (asc/desc) y si hay datos recientes.
+        pdates = [d for d in (rel_date_of(r) for r in releases) if d]
+        rango = ""
+        if pdates:
+            rango = f" fechas {min(pdates).date()}..{max(pdates).date()}"
+        print(f"   [page {pages}] releases={len(releases)}{rango} next={'sí' if next_link(package) else 'no'}")
+        if DIAG:
+            for r in releases[:3]:
+                t = g(r, "tender", "title", default="(sin título)")
+                print(f"      · {rel_date_of(r).date() if rel_date_of(r) else '----'} | {str(t)[:90]}")
 
         # Diagnóstico de la primera página: nos dice qué devolvió la API de verdad.
         if pages == 1:
@@ -303,15 +322,17 @@ def main():
         stop = False
         for rel in releases:
             seen += 1
-            rel_date = parse_date(rel.get("date")) or parse_date(g(rel, "tender", "tenderPeriod", "startDate"))
-            # order=desc: cuando pasamos el corte, dejamos de paginar.
-            if rel_date and rel_date < cutoff:
+            rel_date = rel_date_of(rel)
+            # order=desc: cuando pasamos el corte, dejamos de paginar. En DIAG no cortamos.
+            if rel_date and rel_date < cutoff and not DIAG:
                 stop = True
                 continue
             kw = first_match(haystack(rel), keywords)
             if not kw:
                 continue
             matched += 1
+            if DIAG:
+                print(f"      ✓ MATCH [{kw}] {str(g(rel,'tender','title',default=''))[:80]}")
             opp = build_opportunity(rel, kw)
             if not opp["p_external_id"]:
                 continue
