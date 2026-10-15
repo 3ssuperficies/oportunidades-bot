@@ -35,10 +35,16 @@ except Exception:  # noqa: BLE001
     _HAS_CFFI = False
 
 # ── Config ───────────────────────────────────────────────────────────────────
-OECE_API_BASE = os.environ.get(
-    "OECE_API_BASE",
-    "https://contratacionesabiertas.oece.gob.pe/api/v1/releasesAfter?format=json&order=desc",
+# La API ordena por un índice interno y está particionada por año. Sin pistas
+# arranca en 2024. Con `first=<prefijo>-999999-<año>` la apuntamos al año actual,
+# empezando por el índice más alto (lo más nuevo de ese año) y bajando.
+OECE_OCID_PREFIX = os.environ.get("OECE_OCID_PREFIX", "ocds-dgv273-seacev3")
+START_YEAR = int(os.environ.get("START_YEAR", str(datetime.now(timezone.utc).year)))
+_DEFAULT_BASE = (
+    "https://contratacionesabiertas.oece.gob.pe/api/v1/releasesAfter"
+    f"?format=json&order=desc&first={OECE_OCID_PREFIX}-999999-{START_YEAR}"
 )
+OECE_API_BASE = os.environ.get("OECE_API_BASE", _DEFAULT_BASE)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "2"))
@@ -321,13 +327,11 @@ def main():
         if not releases:
             break
 
-        stop = False
         for rel in releases:
             seen += 1
             rel_date = rel_date_of(rel)
-            # order=desc: cuando pasamos el corte, dejamos de paginar. En DIAG no cortamos.
+            # Procesos viejos: no los guardamos, pero seguimos mirando la página.
             if rel_date and rel_date < cutoff and not DIAG:
-                stop = True
                 continue
             kw = first_match(haystack(rel), keywords)
             if not kw:
@@ -341,7 +345,9 @@ def main():
             if upsert(opp):
                 saved += 1
 
-        if stop:
+        # Paramos de paginar cuando TODA la página ya es más vieja que el corte.
+        pmax = max(pdates) if pdates else None
+        if pmax and pmax < cutoff and not DIAG:
             break
         url = next_link(package)
         time.sleep(0.5)  # cortesía con el servidor
