@@ -20,6 +20,8 @@ import os
 import sys
 import json
 import time
+import gzip
+import tempfile
 import unicodedata
 from urllib.parse import urlencode
 from datetime import datetime, timezone, timedelta
@@ -45,6 +47,16 @@ _DEFAULT_BASE = (
     f"?format=json&order=desc&first={OECE_OCID_PREFIX}-999999-{START_YEAR}"
 )
 OECE_API_BASE = os.environ.get("OECE_API_BASE", _DEFAULT_BASE)
+
+# Fuente de datos: 'bulk' (archivo anual OCDS del Open Contracting Partnership,
+# confiable y sin bloqueos) o 'api' (la API en vivo del OECE, caprichosa).
+SOURCE = os.environ.get("SOURCE", "bulk")
+BULK_URL = os.environ.get(
+    "BULK_URL",
+    f"https://data.open-contracting.org/en/publication/135/download?name={START_YEAR}.jsonl.gz",
+)
+# En bulk, 0 = sin filtro de fecha (trae todos los del año que coincidan).
+BULK_LOOKBACK_DAYS = int(os.environ.get("BULK_LOOKBACK_DAYS", "0"))
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "2"))
@@ -267,23 +279,86 @@ def next_link(package):
     return None
 
 
+def rel_date_of(r):
+    return parse_date(r.get("date")) or parse_date(g(r, "tender", "tenderPeriod", "startDate"))
+
+
+# ── Fuente BULK: archivo anual OCDS (gzip jsonl) del Open Contracting Partnership
+def run_bulk(keywords):
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=BULK_LOOKBACK_DAYS)
+        if BULK_LOOKBACK_DAYS else None
+    )
+    print(f"   bajando archivo anual: {BULK_URL}")
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl.gz")
+    try:
+        with requests.get(BULK_URL, stream=True, timeout=900,
+                          headers={"User-Agent": DEFAULT_UA}) as r:
+            r.raise_for_status()
+            total = 0
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                tmp.write(chunk)
+                total += len(chunk)
+        tmp.close()
+        print(f"   descargado: {total/1_048_576:.1f} MB")
+
+        # Abrir como gzip; si el servidor ya lo entregó descomprimido, leer plano.
+        try:
+            fh = gzip.open(tmp.name, "rt", encoding="utf-8", errors="replace")
+            fh.read(1); fh.seek(0)
+        except (OSError, EOFError):
+            fh = open(tmp.name, "rt", encoding="utf-8", errors="replace")
+
+        seen = matched = saved = lines = 0
+        with fh:
+            for line in fh:
+                line = line.strip().rstrip(",")
+                if not line or line in ("[", "]"):
+                    continue
+                try:
+                    pkg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                lines += 1
+                for rel in extract_releases(pkg):
+                    seen += 1
+                    if cutoff:
+                        d = rel_date_of(rel)
+                        if d and d < cutoff:
+                            continue
+                    kw = first_match(haystack(rel), keywords)
+                    if not kw:
+                        continue
+                    matched += 1
+                    opp = build_opportunity(rel, kw)
+                    if opp["p_external_id"] and upsert(opp):
+                        saved += 1
+        print(f"== Fin (bulk). líneas:{lines} releases:{seen} coinciden:{matched} guardadas:{saved} ==")
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
     keywords = load_keywords(KEYWORDS_FILE)
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     print(f"== Bot Oportunidades · {datetime.now(timezone.utc).isoformat()} ==")
-    print(f"   keywords: {len(keywords)} · lookback: {LOOKBACK_DAYS}d · dry_run: {DRY_RUN} · http: {HTTP_ENGINE}")
+    print(f"   keywords: {len(keywords)} · source: {SOURCE} · dry_run: {DRY_RUN} · http: {HTTP_ENGINE}")
 
     if not DRY_RUN and not DIAG and (not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY):
         print("ERROR: faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.", file=sys.stderr)
         sys.exit(2)
 
+    if SOURCE == "bulk":
+        run_bulk(keywords)
+        return
+
     url = OECE_API_BASE
     seen, matched, saved, pages = 0, 0, 0, 0
     page_cap = min(MAX_PAGES, DIAG_PAGES) if DIAG else MAX_PAGES
-
-    def rel_date_of(r):
-        return parse_date(r.get("date")) or parse_date(g(r, "tender", "tenderPeriod", "startDate"))
 
     while url and pages < page_cap:
         pages += 1
