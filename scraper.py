@@ -296,7 +296,9 @@ def main():
         rango = ""
         if pdates:
             rango = f" fechas {min(pdates).date()}..{max(pdates).date()}"
-        print(f"   [page {pages}] releases={len(releases)}{rango} next={'sí' if next_link(package) else 'no'}")
+        _nxt = next_link(package) or ""
+        print(f"   [page {pages}] releases={len(releases)}{rango}")
+        print(f"   [next] {_nxt[:260]}")
         if DIAG:
             for r in releases[:3]:
                 t = g(r, "tender", "title", default="(sin título)")
